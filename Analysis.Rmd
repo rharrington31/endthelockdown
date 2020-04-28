@@ -1,0 +1,171 @@
+---
+title: "EndTheShutdown Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+library(tidytext)
+library(topicmodels)
+library(widyr)
+library(igraph)
+library(ggraph)
+```
+
+```{r}
+read_in_tweets <- function(file_name) {
+  
+  read_csv(here::here("Data", file_name)) %>% 
+    mutate(file = file_name,
+           ingest_date = str_remove(file, "_lockdown_tweets.csv"),
+           ingest_date = as.POSIXct(ingest_date)) %>% 
+    select(-file)
+  
+}
+```
+
+
+```{r}
+files <- list.files(here::here("Data"))
+
+raw_data <- 
+  files %>% 
+  map_df(~ read_in_tweets(.))
+
+lockdown_tweets <- 
+  raw_data %>% 
+  group_by(status_id) %>% 
+  filter(ingest_date == max(ingest_date)) %>% 
+  ungroup()
+
+data("stop_words")
+```
+
+
+```{r}
+lockdown_tweets %>% 
+  count(screen_name, sort = T)
+```
+
+```{r}
+stop_words_twitter <-
+  c("https", "t.co", "amp")
+```
+
+```{r}
+tweet_text <- 
+  lockdown_tweets %>% 
+  select(status_id, text)
+```
+
+```{r}
+tweet_text <- 
+  tweet_text %>% 
+  mutate(text = str_remove_all(text, "19"),
+         text = str_replace_all(text, regex("covid", ignore_case = T), "covid19"))
+```
+
+```{r}
+tweet_unigrams <-
+  tweet_text %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(stop_words, by = "word") %>% 
+  filter(! word %in% stop_words_twitter) %>% 
+  mutate(word = str_replace_all(word, "[[:punct:]]+", " "),
+         word = str_replace_all(word, "[[:digit:]]+", " "))
+
+word_counts <- 
+  tweet_unigrams %>% 
+  count(status_id, word, sort = T)
+```
+
+```{r}
+incorrect_IDs <-
+  tweet_unigrams %>% 
+  filter(str_detect(word, "covid$")) %>% 
+  select(ID) %>% unlist() %>% unname()
+
+tweet_text %>% 
+  filter(ID %in% incorrect_IDs)
+```
+
+
+
+
+```{r}
+dtm <-
+  word_counts %>% 
+  cast_dtm(ID, word, n)
+```
+
+```{r}
+tweet_LDA <-
+  c(2:20) %>% 
+  purrr::map(~ LDA(dtm, k = ., control = list(seed = 605)))
+```
+
+```{r}
+
+graph_topic_top_words <- function(df) {
+  df %>% 
+    tidy() %>% 
+    group_by(topic) %>% 
+    top_n(5, beta) %>% 
+    ungroup() %>% 
+    arrange(topic, desc(beta)) %>% 
+    mutate(term = reorder_within(term, beta, topic)) %>% 
+    ggplot() +
+    geom_col(aes(x = term,
+                 y = beta)) +
+    coord_flip() +
+    scale_x_reordered() +
+    facet_wrap(~ topic, scales = "free_y")
+}
+
+```
+
+```{r}
+tweet_LDA %>% 
+  purrr::map(~ graph_topic_top_words(.))
+```
+
+```{r}
+associated_words <- 
+  tweet_unigrams %>% 
+  group_by(word) %>% 
+  filter(n() >= 75) %>% 
+  ungroup() %>% 
+  pairwise_cor(word, status_id) %>% 
+  arrange(desc(correlation))
+```
+
+```{r}
+associated_words %>% 
+  filter(str_detect(item1, "endtheshutdown$"))
+```
+
+
+```{r}
+
+set.seed(605)
+
+associated_words %>% 
+  head(1000) %>%
+  igraph::graph_from_data_frame() %>% 
+  ggraph(layout = "kk") +
+  geom_edge_link(aes(edge_alpha = correlation)) +
+  geom_node_point() +
+  geom_node_text(aes(label = name),
+                 repel = T) +
+  theme_void() +
+  theme(legend.position = "none")
+
+```
+
+
+
